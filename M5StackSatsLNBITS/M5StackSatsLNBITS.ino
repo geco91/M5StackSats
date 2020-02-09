@@ -1,9 +1,4 @@
-/**
- *  M5StackSatsZAP uses a non-fullnode, local Zap desktop wallet install and serveo.net (further details line 27)
- *  Macaroons will need to be converted to hex strings, in terminal run "xxd -plain readonly.macaroon > readmac.txt"...in Linux Zap's readonly.macaroon can be found in `$XDG_CONFIG_HOME/Zap/lnd/bitcoin/mainnet/wallet-1` (or under`~/.config`)
- */
-
-#include "PAYWSplash.c"
+#include "lnbits.c"
 #include <M5Stack.h> 
 #include <string.h>
 #include <ArduinoJson.h>
@@ -14,37 +9,43 @@
 #define KEYBOARD_INT          5
 
 //Details to change
+//Wifi details
 char wifiSSID[] = "YOUR-WIFI";
-char wifiPASS[] = "YOUR-PASS";
-const char* lntxbothost = "paywall.link";
-String invoicekey = "YOUR-PAYWALL-KEY"; 
-String invoicenum = "INVOICE-NUMBER"; //Create a paywall, go to "Details" of the paywall https://paywall.link/dashboard/paywalls, number in the URL, ie 931 from https://paywall.link/link/view?id=931 
-String memo = "M5 "; //memo suffix, followed by a random number
-String on_currency = "BTCGBP"; //currency can be changed here ie BTCUSD BTCGBP etc
-String payid;
+char wifiPASS[] = "PASSWORD";
+
+String pubkey;
+String totcapacity;
+const char* payment_request;
+bool certcheck = false;
+
+//LNBITS DETAILS
 int httpsPort = 443;
+const char* lnbitshost = "YOUR-LNBITS-HOST";
+String invoicekey = "YOUR-LNBITS-WALLET-KEY"; 
 
-
-String choice = "";
+String choice;
+String payhash;
+String on_currency = "BTCGBP"; //currency can be changed here ie BTCUSD BTCGBP etc
 String on_sub_currency = on_currency.substring(3);
+String memo = "Memo "; //memo suffix, followed by the price then a random number
 
   String key_val;
   String cntr = "0";
-  String inputs = "";
+  String inputs;
   int keysdec;
   int keyssdec;
   float temp;  
   String fiat;
   float satoshis;
-  String nosats = "";
+  String nosats;
   float conversion;
-  String postid = "";
-  String data_id = "";
+  String postid;
+  String data_id;
   String data_lightning_invoice_payreq = "";
-  String data_status = "";
+  String data_status;
   bool settle = false;
-  String payreq = "";
-  String hash = "";
+  String payreq;
+  String hash;
 
 void page_input()
 {
@@ -98,7 +99,7 @@ void get_keypad(){
 
 void setup() {
   M5.begin();
-  M5.Lcd.drawBitmap(0, 0, 320, 240, (uint8_t *)PAYWSplash_map);
+  M5.Lcd.drawBitmap(0, 0, 320, 240, (uint8_t *)lnbits_map);
   Wire.begin();
 
 
@@ -242,51 +243,48 @@ void on_rates(){
 
 void reqinvoice(String value){
 
-  WiFiClientSecure client;
+ WiFiClientSecure client;
   
-  if (!client.connect(lntxbothost, httpsPort)) {
-    Serial.println("fail");
+  if (!client.connect(lnbitshost, httpsPort)) {
     return;
-    
   }
   
-  String topost = "{  \"num_satoshis\" : " + nosats +", \"memo\" :\""+ memo + String(random(1,1000)) + "\"}";
-  
-  String url = "/v1/user/paywall/" + invoicenum + "/invoice";
-  client.print(String("POST ") + url + "?access-token=" + invoicekey + " HTTP/1.1\r\n" +
-                "Host: " + lntxbothost + "\r\n" +
+  String topost = "{  \"value\" : \"" + nosats +"\", \"memo\" :\""+ memo + String(random(1,1000)) + "\"}";
+  String url = "/v1/invoices";
+  client.print(String("POST ") + url +" HTTP/1.1\r\n" +
+                "Host: " + lnbitshost + "\r\n" +
                 "User-Agent: ESP32\r\n" +
+                "Grpc-Metadata-macaroon:"+ invoicekey +"\r\n" +
                 "Content-Type: application/json\r\n" +
                 "Connection: close\r\n" +
                 "Content-Length: " + topost.length() + "\r\n" +
                 "\r\n" + 
                 topost + "\n");
 
-  
+
+
   while (client.connected()) {
     String line = client.readStringUntil('\n');
-   // Serial.println(line);
+   Serial.println(line);
     if (line == "\r") {
       break;
     }
   }
   
-  String line = client.readStringUntil('\n');
-  line = client.readStringUntil('\n');
+  String line = client.readString();
+
+
   Serial.println(line);
+  const size_t capacity = JSON_OBJECT_SIZE(2) + 800;
+  DynamicJsonDocument doc(capacity);
 
-  
-const size_t capacity = JSON_OBJECT_SIZE(17) + 500;
-
-DynamicJsonDocument doc(capacity);
-deserializeJson(doc, line);
-
-const char* payment_request = doc["request"]; 
-int id = doc["id"]; 
-payreq = (String)payment_request;
-payid = (String)id;
-Serial.println(payreq);
-Serial.println(payid);
+  deserializeJson(doc, line);
+  const char* pay_req = doc["pay_req"]; 
+  const char* payment_hash = doc["payment_hash"]; 
+  payreq = pay_req;
+  Serial.println(payreq);
+  payhash = payment_hash;
+  Serial.println(payhash);
 }
 
 
@@ -356,57 +354,29 @@ void checkpaid(){
 
 
 void checkpayment(){
-  
- 
   WiFiClientSecure client;
   
-  if (!client.connect(lntxbothost, httpsPort)) {
-    Serial.println("fail");
+  if (!client.connect(lnbitshost, httpsPort)) {
     return;
-    
   }
- 
-  String url = "/v1/user/invoice/" + payid;
-  client.print(String("GET ") + url + "?access-token=" + invoicekey + " HTTP/1.1\r\n" +
-                "Host: " + lntxbothost + "\r\n" +
+  String url = "/v1/invoice/";
+  client.print(String("GET ") + url + payhash +" HTTP/1.1\r\n" +
+                "Host: " + lnbitshost + "\r\n" +
                 "User-Agent: ESP32\r\n" +
+                "Grpc-Metadata-macaroon:"+ invoicekey +"\r\n" +
                 "Content-Type: application/json\r\n" +
-               "Connection: close\r\n\r\n");
-    Serial.println(String("GET ") + url + "?access-token=" + invoicekey + " HTTP/1.1\r\n" +
-                "Host: " + lntxbothost + "\r\n" +
-                "User-Agent: ESP32\r\n" +
-                "Content-Type: application/json\r\n" +
-               "Connection: close\r\n\r\n");
-  
+                "Connection: close\r\n\r\n");
 
 
-  
-  while (client.connected()) {
-    String line = client.readStringUntil('\n');
-    
-    if (line == "\r") {
-      break;
-      Serial.println(line);
-    }
-  }
-  
   String line = client.readStringUntil('\n');
-  line = client.readStringUntil('\n');
   Serial.println(line);
-const size_t capacity = JSON_OBJECT_SIZE(9) + 400;
-DynamicJsonDocument doc(capacity);
 
-
-deserializeJson(doc, line);
-
-int settled = doc["settled"]; 
-Serial.println(settled);
-if (settled == 1){
-  settle = true;
-}
-else{
-  settle = false;
-}
+  if (line == ""){
+    settle = false;
+  }
+  else{
+    settle = true;
+  }
 }
 
 void page_qrdisplay(String xxx)
